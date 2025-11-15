@@ -219,15 +219,15 @@ fn collect_case_alignment(tree: &SyntaxTree) -> HashMap<usize, usize> {
                 for item in &case.nodes.4 {
                     collect_case_item(item, &mut entries);
                 }
-                if entries.len() >= 2 {
-                    if let Some(max_width) = entries.iter().map(|(_, width)| *width).max() {
-                        for (offset, width) in entries {
-                            let padding = max_width.saturating_sub(width) + 1;
-                            alignment.insert(offset, padding);
-                        }
-                    }
-                }
+                apply_alignment(entries, &mut alignment);
             }
+        } else if let NodeEvent::Enter(RefNode::RandcaseStatement(stmt)) = event {
+            let mut entries = Vec::new();
+            collect_randcase_item(&stmt.nodes.1, &mut entries);
+            for item in &stmt.nodes.2 {
+                collect_randcase_item(item, &mut entries);
+            }
+            apply_alignment(entries, &mut alignment);
         }
     }
     alignment
@@ -248,6 +248,26 @@ fn collect_case_item(item: &sv_parser::CaseItem, entries: &mut Vec<(usize, usize
                 let width = symbol.nodes.0.offset.saturating_sub(start);
                 entries.push((symbol.nodes.0.offset, width));
             }
+        }
+    }
+}
+
+fn collect_randcase_item(item: &sv_parser::RandcaseItem, entries: &mut Vec<(usize, usize)>) {
+    if let Some(start) = first_token_offset((&item.nodes.0).into()) {
+        let symbol = &item.nodes.1.nodes.0;
+        let width = symbol.offset.saturating_sub(start);
+        entries.push((symbol.offset, width));
+    }
+}
+
+fn apply_alignment(entries: Vec<(usize, usize)>, alignment: &mut HashMap<usize, usize>) {
+    if entries.len() < 2 {
+        return;
+    }
+    if let Some(max_width) = entries.iter().map(|(_, width)| *width).max() {
+        for (offset, width) in entries {
+            let padding = max_width.saturating_sub(width) + 1;
+            alignment.insert(offset, padding);
         }
     }
 }
@@ -515,6 +535,24 @@ impl<'a> Formatter<'a> {
         self.at_line_start = true;
     }
 
+    fn maybe_insert_section_spacing(&mut self, keyword: &str) {
+        if !is_section_decl_keyword(keyword) {
+            return;
+        }
+        if self.output.is_empty() {
+            return;
+        }
+        self.trim_trailing_whitespace();
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+        if !self.output.ends_with("\n\n") {
+            self.output.push('\n');
+        }
+        self.at_line_start = true;
+        self.pending_space = false;
+    }
+
     fn handle_directive(&mut self, token: &Token) {
         if !self.at_line_start {
             self.trim_trailing_whitespace();
@@ -544,6 +582,7 @@ impl<'a> Formatter<'a> {
         }
 
         if self.at_line_start {
+            self.maybe_insert_section_spacing(&lowered);
             self.write_indent();
         } else if self.pending_space && !needs_no_space_before(&token.text) {
             self.output.push(' ');
@@ -705,10 +744,15 @@ fn is_indent_keyword(keyword: &str) -> bool {
             | "case"
             | "casex"
             | "casez"
+            | "randcase"
             | "fork"
             | "generate"
             | "interface"
     )
+}
+
+fn is_section_decl_keyword(keyword: &str) -> bool {
+    matches!(keyword, "package" | "class" | "interface")
 }
 
 fn is_dedent_keyword(keyword: &str) -> bool {
@@ -1049,6 +1093,34 @@ endmodule
             short.contains("0    :"),
             "short label should be padded before colon:\n{formatted}"
         );
+    }
+
+    #[test]
+    fn adds_blank_lines_around_declarations() {
+        let input = "package demo;
+class foo;
+endclass
+class bar;
+endclass
+endpackage
+interface baz();
+endinterface
+";
+        let formatted = format_text(input, &cfg()).unwrap();
+        let expected = "\
+package demo;
+
+  class foo;
+  endclass
+
+  class bar;
+  endclass
+endpackage
+
+interface baz();
+  endinterface
+";
+        assert_eq!(formatted, expected);
     }
 
     #[test]

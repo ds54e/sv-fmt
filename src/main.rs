@@ -93,6 +93,9 @@ fn main() -> Result<()> {
                 );
             }
         }
+        if !lint_failures.is_empty() {
+            eprintln!("hint: adjust max_line_length in sv-fmt.toml or via --config if needed");
+        }
         std::process::exit(1);
     }
 
