@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -26,13 +26,17 @@ enum TokenKind {
 struct Token {
     text: String,
     kind: TokenKind,
+    offset: usize,
+    len: usize,
 }
 
 impl Token {
-    fn new(text: impl Into<String>, kind: TokenKind) -> Self {
+    fn new_spanned(text: impl Into<String>, kind: TokenKind, offset: usize, len: usize) -> Self {
         Self {
             text: text.into(),
             kind,
+            offset,
+            len,
         }
     }
 
@@ -55,8 +59,9 @@ impl Token {
 
 pub fn format_text(input: &str, config: &FormatConfig) -> Result<String> {
     let tree = parser::parse(input, &SvParserCfg::default())?;
+    let body_spans = collect_statement_spans(&tree);
     let tokens = tokenize(&tree);
-    let mut formatter = Formatter::new(config, tokens);
+    let mut formatter = Formatter::new(config, tokens, body_spans);
     formatter.format()
 }
 
@@ -74,7 +79,14 @@ fn tokenize(tree: &SyntaxTree) -> Vec<Token> {
                 RefNode::CompilerDirective(_) => directive_depth += 1,
                 RefNode::Locate(loc) => {
                     if let Some(text) = tree.get_str(loc) {
-                        handle_locate(text, whitespace_depth, comment_depth, directive_depth, &mut tokens);
+                        handle_locate(
+                            text,
+                            loc.offset,
+                            whitespace_depth,
+                            comment_depth,
+                            directive_depth,
+                            &mut tokens,
+                        );
                     }
                 }
                 _ => {}
@@ -93,6 +105,7 @@ fn tokenize(tree: &SyntaxTree) -> Vec<Token> {
 
 fn handle_locate(
     text: &str,
+    offset: usize,
     whitespace_depth: usize,
     comment_depth: usize,
     directive_depth: usize,
@@ -102,23 +115,102 @@ fn handle_locate(
         return;
     }
     if comment_depth > 0 {
-        tokens.push(Token::new(text, TokenKind::Comment));
+        tokens.push(Token::new_spanned(text, TokenKind::Comment, offset, text.len()));
         return;
     }
     if whitespace_depth > 0 {
+        let mut current_offset = offset;
         for ch in text.chars() {
             if ch == '\n' {
-                tokens.push(Token::new("\n", TokenKind::Newline));
+                tokens.push(Token::new_spanned("\n", TokenKind::Newline, current_offset, 1));
             }
+            current_offset += ch.len_utf8();
         }
         return;
     }
     if directive_depth > 0 {
-        tokens.push(Token::new(text, TokenKind::Directive));
+        tokens.push(Token::new_spanned(text, TokenKind::Directive, offset, text.len()));
         return;
     }
 
-    tokens.push(Token::new(text, classify_token(text)));
+    tokens.push(Token::new_spanned(
+        text,
+        classify_token(text),
+        offset,
+        text.len(),
+    ));
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ByteSpan {
+    start: usize,
+    end: usize,
+}
+
+impl ByteSpan {
+    fn contains(&self, offset: usize) -> bool {
+        offset >= self.start && offset < self.end
+    }
+}
+
+fn collect_statement_spans(tree: &SyntaxTree) -> HashMap<usize, ByteSpan> {
+    let mut spans = HashMap::new();
+    for event in tree.into_iter().event() {
+        match event {
+            NodeEvent::Enter(RefNode::ConditionalStatement(stmt)) => {
+                let (_, if_kw, _, then_stmt, else_ifs, else_stmt) = &stmt.nodes;
+                record_span(if_kw, RefNode::StatementOrNull(then_stmt), &mut spans);
+                for (_, elseif_kw, _, body) in else_ifs {
+                    record_span(elseif_kw, RefNode::StatementOrNull(body), &mut spans);
+                }
+                if let Some((else_kw, body)) = else_stmt {
+                    record_span(else_kw, RefNode::StatementOrNull(body), &mut spans);
+                }
+            }
+            NodeEvent::Enter(RefNode::LoopStatement(stmt)) => match stmt {
+                sv_parser::LoopStatement::Forever(node) => {
+                    record_span(&node.nodes.0, RefNode::StatementOrNull(&node.nodes.1), &mut spans)
+                }
+                sv_parser::LoopStatement::Repeat(node) => {
+                    record_span(&node.nodes.0, RefNode::StatementOrNull(&node.nodes.2), &mut spans)
+                }
+                sv_parser::LoopStatement::While(node) => {
+                    record_span(&node.nodes.0, RefNode::StatementOrNull(&node.nodes.2), &mut spans)
+                }
+                sv_parser::LoopStatement::For(node) => {
+                    record_span(&node.nodes.0, RefNode::StatementOrNull(&node.nodes.2), &mut spans)
+                }
+                sv_parser::LoopStatement::DoWhile(node) => {
+                    record_span(&node.nodes.0, RefNode::StatementOrNull(&node.nodes.1), &mut spans)
+                }
+                sv_parser::LoopStatement::Foreach(node) => {
+                    record_span(&node.nodes.0, RefNode::Statement(&node.nodes.2), &mut spans)
+                }
+            },
+            _ => {}
+        }
+    }
+    spans
+}
+
+fn record_span<'a>(keyword: &'a sv_parser::Keyword, node: RefNode<'a>, spans: &mut HashMap<usize, ByteSpan>) {
+    if let Some(span) = node_span(node) {
+        spans.insert(keyword.nodes.0.offset, span);
+    }
+}
+
+fn node_span(node: RefNode) -> Option<ByteSpan> {
+    let mut start = None;
+    let mut end = 0;
+    for event in node.into_iter().event() {
+        if let NodeEvent::Enter(RefNode::Locate(loc)) = event {
+            if start.is_none() {
+                start = Some(loc.offset);
+            }
+            end = loc.offset + loc.len;
+        }
+    }
+    start.map(|s| ByteSpan { start: s, end })
 }
 
 fn classify_token(text: &str) -> TokenKind {
@@ -199,6 +291,7 @@ fn is_symbol_char(ch: char) -> bool {
 struct Formatter<'a> {
     config: &'a FormatConfig,
     tokens: Vec<Token>,
+    body_spans: HashMap<usize, ByteSpan>,
     idx: usize,
     output: String,
     indent_level: usize,
@@ -213,6 +306,7 @@ struct WrapTracker {
     mode: WrapMode,
     paren_depth: usize,
     keyword: Option<WrapKeyword>,
+    body_span: Option<ByteSpan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,10 +328,11 @@ enum WrapKeyword {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(config: &'a FormatConfig, tokens: Vec<Token>) -> Self {
+    fn new(config: &'a FormatConfig, tokens: Vec<Token>, body_spans: HashMap<usize, ByteSpan>) -> Self {
         Self {
             config,
             tokens,
+            body_spans,
             idx: 0,
             output: String::new(),
             indent_level: 0,
@@ -363,7 +458,8 @@ impl<'a> Formatter<'a> {
         self.previous_call_ident = token.is_identifier_like();
 
         if self.config.wrap_multiline_blocks {
-            self.wrap_tracker.maybe_start(&lowered);
+            let span = self.body_spans.get(&token.offset).cloned();
+            self.wrap_tracker.maybe_start(&lowered, span);
         }
     }
 
@@ -549,6 +645,7 @@ impl WrapTracker {
             mode: WrapMode::Idle,
             paren_depth: 0,
             keyword: None,
+            body_span: None,
         }
     }
 
@@ -556,11 +653,12 @@ impl WrapTracker {
         self.mode = WrapMode::Idle;
         self.paren_depth = 0;
         self.keyword = None;
+        self.body_span = None;
     }
 
     fn newline(&mut self) {}
 
-    fn maybe_start(&mut self, keyword: &str) {
+    fn maybe_start(&mut self, keyword: &str, span: Option<ByteSpan>) {
         let kw = match keyword {
             "if" => Some(WrapKeyword::If),
             "else" => Some(WrapKeyword::Else),
@@ -572,6 +670,7 @@ impl WrapTracker {
             _ => None,
         };
         if let Some(kw) = kw {
+            self.body_span = span;
             self.mode = match kw {
                 WrapKeyword::If | WrapKeyword::For | WrapKeyword::Foreach | WrapKeyword::While => {
                     WrapMode::WaitingCondition
@@ -616,10 +715,16 @@ impl WrapTracker {
             None => return false,
         };
 
+        let threshold = if self.body_span.is_some() { 1 } else { 2 };
         let mut semicolons = 0usize;
         for token in tokens.iter().skip(index) {
             if matches!(token.kind, TokenKind::Newline) {
                 continue;
+            }
+            if let Some(span) = &self.body_span {
+                if span.contains(token.offset) {
+                    continue;
+                }
             }
             if token.is_keyword("begin") {
                 return false;
@@ -632,13 +737,13 @@ impl WrapTracker {
             }
             if token.text == ";" {
                 semicolons += 1;
-                if semicolons >= 2 {
+                if semicolons >= threshold {
                     break;
                 }
             }
         }
 
-        semicolons >= 2
+        semicolons >= threshold
     }
 }
 
@@ -746,6 +851,25 @@ module x;
 endmodule
 ";
         assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn does_not_wrap_case_statement_body() {
+        let input = "module x;
+always_comb begin
+if (cond)
+  case(sel)
+    0: foo <= 1;
+    default: foo <= 0;
+  endcase
+end
+endmodule
+";
+        let formatted = format_text(input, &cfg()).unwrap();
+        assert!(
+            !formatted.contains("if (cond)\n    begin"),
+            "case body should not trigger auto begin:\n{formatted}"
+        );
     }
 
     #[test]
