@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     }
 
     let mut failed_paths = Vec::new();
-    let mut lint_failures: Vec<(PathBuf, Vec<(usize, usize)>)> = Vec::new();
+    let mut lint_failures: Vec<(PathBuf, Vec<LineLengthViolation>)> = Vec::new();
 
     for path in files {
         let original = read_input(&path)?;
@@ -83,14 +83,18 @@ fn main() -> Result<()> {
             eprintln!("needs formatting: {}", path.display());
         }
         for (path, lines) in &lint_failures {
-            for (line, length) in lines {
+            for violation in lines {
                 eprintln!(
                     "line {} has {} columns (max {}) in {}",
-                    line,
-                    length,
+                    violation.line,
+                    violation.columns,
                     config.max_line_length,
                     path.display()
                 );
+                eprintln!("    | {}", violation.preview);
+                if config.max_line_length > 0 {
+                    eprintln!("{}", caret_marker(&violation.preview, config.max_line_length));
+                }
             }
         }
         if !lint_failures.is_empty() {
@@ -168,7 +172,14 @@ fn ensure_trailing_newline(text: &str) -> String {
     result
 }
 
-fn line_length_violations(text: &str, max_len: usize) -> Vec<(usize, usize)> {
+#[derive(Debug, Clone)]
+struct LineLengthViolation {
+    line: usize,
+    columns: usize,
+    preview: String,
+}
+
+fn line_length_violations(text: &str, max_len: usize) -> Vec<LineLengthViolation> {
     if max_len == 0 {
         return Vec::new();
     }
@@ -176,7 +187,41 @@ fn line_length_violations(text: &str, max_len: usize) -> Vec<(usize, usize)> {
         .enumerate()
         .filter_map(|(idx, line)| {
             let cols = line.chars().count();
-            if cols > max_len { Some((idx + 1, cols)) } else { None }
+            if cols > max_len {
+                Some(LineLengthViolation {
+                    line: idx + 1,
+                    columns: cols,
+                    preview: line_preview(line, max_len),
+                })
+            } else {
+                None
+            }
         })
         .collect()
+}
+
+fn line_preview(line: &str, max_len: usize) -> String {
+    let limit = max_len.saturating_add(20).max(40);
+    let mut preview = String::new();
+    let mut count = 0;
+    for ch in line.chars() {
+        if count >= limit {
+            preview.push_str("...");
+            break;
+        }
+        preview.push(ch);
+        count += 1;
+    }
+    preview
+}
+
+fn caret_marker(preview: &str, limit: usize) -> String {
+    let target = limit.min(preview.chars().count());
+    let mut marker = String::from("    | ");
+    for ch in preview.chars().take(target) {
+        marker.push(if ch == '\t' { '\t' } else { ' ' });
+    }
+    marker.push('^');
+    marker.push_str(&format!(" column {}", limit + 1));
+    marker
 }

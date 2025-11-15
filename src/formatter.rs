@@ -369,6 +369,7 @@ struct Formatter<'a> {
     previous_call_ident: bool,
     inserted_blocks: Vec<usize>,
     wrap_tracker: WrapTracker,
+    last_line_was_comment: bool,
 }
 
 struct WrapTracker {
@@ -416,6 +417,7 @@ impl<'a> Formatter<'a> {
             previous_call_ident: false,
             inserted_blocks: Vec::new(),
             wrap_tracker: WrapTracker::new(),
+            last_line_was_comment: false,
         }
     }
 
@@ -497,6 +499,7 @@ impl<'a> Formatter<'a> {
         }
         self.pending_space = false;
         self.previous_call_ident = false;
+        self.last_line_was_comment = true;
     }
 
     fn emit_block_comment(&mut self, text: &str) {
@@ -508,6 +511,7 @@ impl<'a> Formatter<'a> {
         self.pending_space = false;
         self.previous_call_ident = false;
         self.ensure_blank_line_after_block_comment();
+        self.last_line_was_comment = true;
     }
 
     fn ensure_blank_line_before_block_comment(&mut self) {
@@ -542,6 +546,9 @@ impl<'a> Formatter<'a> {
         if self.output.is_empty() {
             return;
         }
+        if self.last_line_was_comment {
+            return;
+        }
         self.trim_trailing_whitespace();
         if !self.output.ends_with('\n') {
             self.output.push('\n');
@@ -551,6 +558,7 @@ impl<'a> Formatter<'a> {
         }
         self.at_line_start = true;
         self.pending_space = false;
+        self.last_line_was_comment = false;
     }
 
     fn handle_directive(&mut self, token: &Token) {
@@ -562,6 +570,7 @@ impl<'a> Formatter<'a> {
         self.output.push_str(&token.text);
         self.at_line_start = false;
         self.pending_space = false;
+        self.last_line_was_comment = false;
     }
 
     fn handle_token(&mut self, token: &Token) {
@@ -607,6 +616,7 @@ impl<'a> Formatter<'a> {
 
         self.at_line_start = false;
         self.previous_call_ident = token.is_identifier_like();
+        self.last_line_was_comment = false;
 
         if self.config.wrap_multiline_blocks {
             let span = self.body_spans.get(&token.offset).cloned();
@@ -745,6 +755,8 @@ fn is_indent_keyword(keyword: &str) -> bool {
             | "casex"
             | "casez"
             | "randcase"
+            | "randsequence"
+            | "covergroup"
             | "fork"
             | "generate"
             | "interface"
@@ -764,7 +776,9 @@ fn is_dedent_keyword(keyword: &str) -> bool {
             | "endfunction"
             | "endtask"
             | "endcase"
+            | "endsequence"
             | "endpackage"
+            | "endgroup"
             | "endgenerate"
             | "join"
             | "join_any"
@@ -790,6 +804,9 @@ static KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "endcase",
         "casex",
         "casez",
+        "randcase",
+        "randsequence",
+        "endsequence",
         "fork",
         "join",
         "join_any",
@@ -798,6 +815,8 @@ static KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "endgenerate",
         "interface",
         "endinterface",
+        "covergroup",
+        "endgroup",
         "if",
         "else",
         "for",

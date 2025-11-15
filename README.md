@@ -10,7 +10,7 @@ Rust 製の SystemVerilog フォーマッタです。sv-mint の設定思想を�
   - カンマや関数呼び出しスペースの調整、`end else` の同一行化
   - プリプロセッサディレクティブの左寄せ
   - `wrap_multiline_blocks=true` 時、複数文を含む `if/else/for/...` に `begin...end` を自動挿入
-  - `package`/`class`/`interface` 宣言の直前に空行を追加し、宣言ブロックを視覚的に分離
+- `package`/`class`/`interface` 宣言の直前に空行を追加し、コメントを崩さずブロックを視覚的に分離
   - 行末空白除去と終端改行の強制
 - **CLI サポート**: `--check` でフォーマット差分のみ検出、`-i/--in-place` で上書き可。複数ファイル/ディレクトリ入力や `sv-fmt.toml` による設定上書きにも対応。
 
