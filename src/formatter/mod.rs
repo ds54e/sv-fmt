@@ -1,4 +1,5 @@
 mod analysis;
+mod emitter;
 mod engine;
 mod lexer;
 mod wrapping;

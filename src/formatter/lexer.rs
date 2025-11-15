@@ -45,7 +45,6 @@ impl Token {
     pub(crate) fn is_symbol(&self, needle: &str) -> bool {
         matches!(self.kind, TokenKind::Symbol) && self.text == needle
     }
-
 }
 
 pub(crate) fn tokenize(tree: &SyntaxTree) -> Vec<Token> {

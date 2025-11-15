@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::{
     analysis::{ByteSpan, collect_case_alignment, collect_statement_spans},
+    emitter::Emitter,
     lexer::{Token, TokenKind, tokenize},
     wrapping::wrap_formatted_output,
 };
@@ -27,14 +28,10 @@ struct Formatter<'a> {
     body_spans: HashMap<usize, ByteSpan>,
     case_alignment: HashMap<usize, usize>,
     idx: usize,
-    output: String,
-    indent_level: usize,
-    at_line_start: bool,
-    pending_space: bool,
+    emitter: Emitter<'a>,
     previous_call_ident: bool,
     inserted_blocks: Vec<usize>,
     wrap_tracker: WrapTracker,
-    last_line_was_comment: bool,
 }
 
 struct WrapTracker {
@@ -97,14 +94,10 @@ impl<'a> Formatter<'a> {
             body_spans,
             case_alignment,
             idx: 0,
-            output: String::new(),
-            indent_level: 0,
-            at_line_start: true,
-            pending_space: false,
+            emitter: Emitter::new(config),
             previous_call_ident: false,
             inserted_blocks: Vec::new(),
             wrap_tracker: WrapTracker::new(),
-            last_line_was_comment: false,
         }
     }
 
@@ -126,11 +119,9 @@ impl<'a> Formatter<'a> {
             }
         }
 
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
+        self.emitter.ensure_trailing_newline();
 
-        let mut final_output = std::mem::take(&mut self.output);
+        let mut final_output = self.emitter.take_output();
         if self.config.auto_wrap_long_lines && self.config.max_line_length > 0 {
             final_output = wrap_formatted_output(final_output, self.config);
         }
@@ -142,18 +133,13 @@ impl<'a> Formatter<'a> {
         if self.config.inline_end_else && self.prev_non_newline().map(|t| t.is_keyword("end")).unwrap_or(false) {
             if let Some(next) = self.peek_non_newline() {
                 if next.is_keyword("else") {
-                    self.pending_space = true;
+                    self.emitter.set_pending_space(true);
                     return;
                 }
             }
         }
 
-        self.trim_trailing_whitespace();
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        self.at_line_start = true;
-        self.pending_space = false;
+        self.emitter.newline();
         self.previous_call_ident = false;
 
         if self.config.wrap_multiline_blocks {
@@ -172,97 +158,62 @@ impl<'a> Formatter<'a> {
     }
 
     fn emit_line_comment(&mut self, text: &str, had_newline: bool) {
-        if self.at_line_start {
-            self.write_indent();
+        if self.emitter.at_line_start() {
+            self.emitter.write_indent();
         } else {
-            self.trim_trailing_whitespace();
-            if self.output.ends_with('\n') {
-                self.write_indent();
+            self.emitter.trim_trailing_whitespace();
+            if self.emitter.buffer().ends_with('\n') {
+                self.emitter.write_indent();
             } else {
-                self.output.push(' ');
+                self.emitter.push_char(' ');
             }
         }
-        self.output.push_str(text);
+        self.emitter.push_str(text);
         if had_newline {
-            self.output.push('\n');
-            self.at_line_start = true;
+            self.emitter.push_char('\n');
+            self.emitter.set_at_line_start(true);
         } else {
-            self.at_line_start = false;
+            self.emitter.set_at_line_start(false);
         }
-        self.pending_space = false;
+        self.emitter.set_pending_space(false);
         self.previous_call_ident = false;
-        self.last_line_was_comment = true;
+        self.emitter.set_last_line_was_comment(true);
     }
 
     fn emit_block_comment(&mut self, text: &str) {
-        self.ensure_blank_line_before_block_comment();
-        self.write_indent();
-        self.output.push_str(text);
-        self.output.push('\n');
-        self.at_line_start = true;
-        self.pending_space = false;
+        self.emitter.ensure_blank_line();
+        self.emitter.write_indent();
+        self.emitter.push_str(text);
+        self.emitter.push_char('\n');
+        self.emitter.set_at_line_start(true);
+        self.emitter.set_pending_space(false);
         self.previous_call_ident = false;
-        self.ensure_blank_line_after_block_comment();
-        self.last_line_was_comment = true;
-    }
-
-    fn ensure_blank_line_before_block_comment(&mut self) {
-        self.trim_trailing_whitespace();
-        if self.output.is_empty() {
-            self.at_line_start = true;
-            return;
-        }
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        if !self.output.ends_with("\n\n") {
-            self.output.push('\n');
-        }
-        self.at_line_start = true;
-    }
-
-    fn ensure_blank_line_after_block_comment(&mut self) {
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        if !self.output.ends_with("\n\n") {
-            self.output.push('\n');
-        }
-        self.at_line_start = true;
+        self.emitter.ensure_blank_line_after_comment();
+        self.emitter.set_last_line_was_comment(true);
     }
 
     fn maybe_insert_section_spacing(&mut self, token: &Token) {
         if !is_section_decl_keyword(token) {
             return;
         }
-        if self.output.is_empty() {
+        if self.emitter.buffer().is_empty() {
             return;
         }
-        if self.last_line_was_comment {
+        if self.emitter.last_line_was_comment() {
             return;
         }
-        self.trim_trailing_whitespace();
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        if !self.output.ends_with("\n\n") {
-            self.output.push('\n');
-        }
-        self.at_line_start = true;
-        self.pending_space = false;
-        self.last_line_was_comment = false;
+        self.emitter.ensure_blank_line();
+        self.emitter.set_last_line_was_comment(false);
     }
 
     fn handle_directive(&mut self, token: &Token) {
-        if !self.at_line_start {
-            self.trim_trailing_whitespace();
-            self.output.push('\n');
-            self.at_line_start = true;
+        if !self.emitter.at_line_start() {
+            self.emitter.newline();
         }
-        self.output.push_str(&token.text);
-        self.at_line_start = false;
-        self.pending_space = false;
-        self.last_line_was_comment = false;
+        self.emitter.push_str(&token.text);
+        self.emitter.set_at_line_start(false);
+        self.emitter.set_pending_space(false);
+        self.emitter.set_last_line_was_comment(false);
     }
 
     fn handle_token(&mut self, token: &Token) {
@@ -272,7 +223,7 @@ impl<'a> Formatter<'a> {
         }
 
         if is_dedent_keyword(token) {
-            self.indent_level = self.indent_level.saturating_sub(1);
+            self.emitter.decrease_indent();
         }
 
         if self.config.align_case_colon && token.text == ":" {
@@ -281,33 +232,34 @@ impl<'a> Formatter<'a> {
             }
         }
 
-        if self.at_line_start {
+        if self.emitter.at_line_start() {
             self.maybe_insert_section_spacing(token);
-            self.write_indent();
-        } else if self.pending_space && !needs_no_space_before(&token.text) {
-            self.output.push(' ');
+            self.emitter.write_indent();
+        } else if self.emitter.pending_space() && !needs_no_space_before(&token.text) {
+            self.emitter.push_char(' ');
         }
 
         if token.text == "," && self.config.space_after_comma {
-            self.strip_trailing_space();
-            self.output.push(',');
-            self.pending_space = true;
+            self.emitter.trim_trailing_whitespace();
+            self.emitter.push_char(',');
+            self.emitter.set_pending_space(true);
         } else if token.text == "(" && self.config.remove_call_space && self.previous_call_ident {
-            self.strip_trailing_space();
-            self.output.push('(');
-            self.pending_space = false;
+            self.emitter.trim_trailing_whitespace();
+            self.emitter.push_char('(');
+            self.emitter.set_pending_space(false);
         } else {
-            self.output.push_str(&token.text);
-            self.pending_space = needs_space_after(&token.text, self.peek_non_newline());
+            self.emitter.push_str(&token.text);
+            let needs_space = needs_space_after(&token.text, self.peek_non_newline());
+            self.emitter.set_pending_space(needs_space);
         }
 
         if is_indent_keyword(token) {
-            self.indent_level += 1;
+            self.emitter.increase_indent();
         }
 
-        self.at_line_start = false;
+        self.emitter.set_at_line_start(false);
         self.previous_call_ident = token.is_identifier_like();
-        self.last_line_was_comment = false;
+        self.emitter.set_last_line_was_comment(false);
 
         if self.config.wrap_multiline_blocks {
             let span = self.body_spans.get(&token.offset).cloned();
@@ -317,40 +269,17 @@ impl<'a> Formatter<'a> {
 
     fn apply_case_alignment(&mut self, token: &Token) -> bool {
         if let Some(padding) = self.case_alignment.get(&token.offset).copied() {
-            self.trim_trailing_whitespace();
+            self.emitter.trim_trailing_whitespace();
             for _ in 0..padding {
-                self.output.push(' ');
+                self.emitter.push_char(' ');
             }
-            self.output.push(':');
-            self.pending_space = true;
-            self.at_line_start = false;
+            self.emitter.push_char(':');
+            self.emitter.set_pending_space(true);
+            self.emitter.set_at_line_start(false);
             self.previous_call_ident = false;
             return true;
         }
         false
-    }
-
-    fn write_indent(&mut self) {
-        if self.config.use_tabs {
-            for _ in 0..self.indent_level {
-                self.output.push('\t');
-            }
-        } else {
-            self.output
-                .push_str(&" ".repeat(self.indent_level * self.config.indent_width));
-        }
-        self.at_line_start = false;
-        self.pending_space = false;
-    }
-
-    fn trim_trailing_whitespace(&mut self) {
-        while self.output.ends_with(' ') || self.output.ends_with('\t') {
-            self.output.pop();
-        }
-    }
-
-    fn strip_trailing_space(&mut self) {
-        self.trim_trailing_whitespace();
     }
 
     fn prev_non_newline(&self) -> Option<&Token> {
@@ -378,13 +307,13 @@ impl<'a> Formatter<'a> {
         }
         if self.wrap_tracker.ready_to_wrap() {
             if self.wrap_tracker.body_needs_wrap(&self.tokens, self.idx + 1) {
-                self.write_indent();
-                self.output.push_str("begin");
-                self.output.push('\n');
-                self.indent_level += 1;
-                self.at_line_start = true;
-                self.pending_space = false;
-                self.inserted_blocks.push(self.indent_level);
+                self.emitter.write_indent();
+                self.emitter.push_str("begin");
+                self.emitter.push_char('\n');
+                self.emitter.increase_indent();
+                self.emitter.set_at_line_start(true);
+                self.emitter.set_pending_space(false);
+                self.inserted_blocks.push(self.emitter.indent_level());
             }
             self.wrap_tracker.reset();
         }
@@ -404,18 +333,16 @@ impl<'a> Formatter<'a> {
     }
 
     fn insert_auto_end(&mut self) {
-        self.trim_trailing_whitespace();
-        if !self.output.ends_with('\n') {
-            self.output.push('\n');
-        }
-        self.indent_level = self.indent_level.saturating_sub(1);
-        self.at_line_start = true;
-        self.pending_space = false;
-        self.write_indent();
-        self.output.push_str("end");
-        self.output.push('\n');
-        self.at_line_start = true;
-        self.pending_space = false;
+        self.emitter.trim_trailing_whitespace();
+        self.emitter.ensure_trailing_newline();
+        self.emitter.decrease_indent();
+        self.emitter.set_at_line_start(true);
+        self.emitter.set_pending_space(false);
+        self.emitter.write_indent();
+        self.emitter.push_str("end");
+        self.emitter.push_char('\n');
+        self.emitter.set_at_line_start(true);
+        self.emitter.set_pending_space(false);
         self.previous_call_ident = false;
     }
 }
