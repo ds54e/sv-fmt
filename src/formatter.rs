@@ -281,6 +281,93 @@ fn first_token_offset(nodes: RefNodes) -> Option<usize> {
     None
 }
 
+fn wrap_long_lines(text: &str, config: &FormatConfig) -> String {
+    let mut result = String::new();
+    for line in text.split_inclusive('\n') {
+        let (body, has_newline) = if line.ends_with('\n') {
+            (&line[..line.len() - 1], true)
+        } else {
+            (line, false)
+        };
+
+        if body.is_empty() && has_newline {
+            result.push('\n');
+            continue;
+        }
+
+        let segments = wrap_line(body, config);
+        for segment in segments {
+            result.push_str(&segment);
+            result.push('\n');
+        }
+
+        if !has_newline && !line.is_empty() && !text.ends_with('\n') {
+            // Remove trailing newline if original line lacked it.
+            result.pop();
+        }
+    }
+    result
+}
+
+fn wrap_line(line: &str, config: &FormatConfig) -> Vec<String> {
+    if config.max_line_length == 0 || line.chars().count() <= config.max_line_length {
+        return vec![line.to_string()];
+    }
+    let trimmed = line.trim_start();
+    if trimmed.is_empty()
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('`')
+    {
+        return vec![line.to_string()];
+    }
+    let indent_bytes = line.len() - trimmed.len();
+    let indent = &line[..indent_bytes];
+    let continuation_indent = if config.use_tabs {
+        format!("{indent}\t")
+    } else {
+        format!("{indent}{}", " ".repeat(config.indent_width))
+    };
+
+    let mut segments = Vec::new();
+    let mut current: Vec<char> = indent.chars().collect();
+    let mut columns = current.len();
+    let mut last_wrap_ix: Option<usize> = None;
+
+    for ch in trimmed.chars() {
+        current.push(ch);
+        columns += 1;
+        if ch.is_whitespace() || matches!(ch, ',' | ';' | '+' | '-' | '*' | '/' | '&' | '|' | '=') {
+            last_wrap_ix = Some(current.len());
+        }
+
+        if columns > config.max_line_length {
+            if let Some(ix) = last_wrap_ix {
+                let (head, tail) = current.split_at(ix);
+                let mut head_str: String = head.iter().collect();
+                if !head_str.trim().is_empty() {
+                    head_str = head_str.trim_end().to_string();
+                }
+                if !head_str.is_empty() {
+                    segments.push(head_str);
+                }
+                let mut new_chars: Vec<char> = continuation_indent.chars().collect();
+                let trimmed_tail: Vec<char> = tail.iter().skip_while(|c| c.is_ascii_whitespace()).cloned().collect();
+                new_chars.extend(trimmed_tail);
+                columns = new_chars.len();
+                current = new_chars;
+                last_wrap_ix = None;
+            } else {
+                break;
+            }
+        }
+    }
+
+    segments.push(current.iter().collect());
+    segments
+}
+
 fn classify_token(text: &str) -> TokenKind {
     let lowered = text.to_ascii_lowercase();
     if KEYWORDS.contains(lowered.as_str()) {
@@ -443,7 +530,12 @@ impl<'a> Formatter<'a> {
             self.output.push('\n');
         }
 
-        Ok(self.output.clone())
+        let mut final_output = self.output.clone();
+        if self.config.auto_wrap_long_lines && self.config.max_line_length > 0 {
+            final_output = wrap_long_lines(&final_output, self.config);
+        }
+
+        Ok(final_output)
     }
 
     fn handle_newline(&mut self) {
@@ -1140,6 +1232,32 @@ interface baz();
   endinterface
 ";
         assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn auto_wraps_long_lines_when_enabled() {
+        let input = "module x;
+assign data = {foo, bar, baz, quux};
+endmodule
+";
+        let mut cfg = FormatConfig::default();
+        cfg.auto_wrap_long_lines = true;
+        cfg.max_line_length = 20;
+        let formatted = format_text(input, &cfg).unwrap();
+        let mut lines = formatted.lines();
+        let assign_line = lines.find(|line| line.contains("assign data")).unwrap();
+        assert!(
+            assign_line.contains("{foo,"),
+            "first line should contain begin of concatenation:\n{formatted}"
+        );
+        let continuation = formatted
+            .lines()
+            .find(|line| line.trim_start().starts_with("bar, baz"))
+            .expect("missing continuation line");
+        assert!(
+            continuation.starts_with("  ") || continuation.starts_with("\t"),
+            "continuation line should be indented:\n{formatted}"
+        );
     }
 
     #[test]

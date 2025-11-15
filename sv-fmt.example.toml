@@ -28,3 +28,5 @@ max_line_length = 100
 # Align `case`/`casez`/`casex` item colons within the same statement.
 align_case_colon = true
 
+# Attempt to wrap long lines automatically (experimental).
+auto_wrap_long_lines = false

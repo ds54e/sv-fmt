@@ -18,6 +18,7 @@ pub struct FormatConfig {
     pub remove_call_space: bool,
     pub max_line_length: usize,
     pub align_case_colon: bool,
+    pub auto_wrap_long_lines: bool,
 }
 
 impl Default for FormatConfig {
@@ -32,6 +33,7 @@ impl Default for FormatConfig {
             remove_call_space: true,
             max_line_length: 100,
             align_case_colon: true,
+            auto_wrap_long_lines: false,
         }
     }
 }
