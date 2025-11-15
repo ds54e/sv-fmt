@@ -39,6 +39,22 @@ sv-fmt --config ./sv-fmt.toml rtl/
 | `--check` | フォーマットが必要な場合に非 0 で終了、差分は表示しない |
 | `--config <PATH>` | `sv-fmt.toml` のパスを指定 |
 
+## ライブラリとして利用する
+
+CLI と同じフォーマッタを、クレート `sv_fmt` としてライブラリ経由で呼び出すこともできます。プラグイン的に統合したい場合は以下のように利用してください。
+
+```rust
+use sv_fmt::{config::FormatConfig, formatter::format_text};
+
+fn format_sv(source: &str) -> anyhow::Result<String> {
+    let cfg = FormatConfig::default();
+    let formatted = format_text(source, &cfg)?;
+    Ok(formatted)
+}
+```
+
+内部モジュールは字句解析・レイアウト・改行制御に分割されているため、今後 API を追加したり、独自ルールを組み合わせたい場合でも追従が容易です。
+
 ## 設定 (`sv-fmt.toml`)
 
 sv-mint と同等のキーを TOML で定義します。存在しない場合は組み込みデフォルトが使われます。
@@ -62,7 +78,7 @@ auto_wrap_long_lines = false
 - `inline_end_else`: `end` の直後の `else` を同一行に配置
 - `space_after_comma`: カンマ後スペース強制、直前スペース除去
 - `remove_call_space`: 関数/タスク呼び出し名と `(` の間のスペースを削除
-- `max_line_length`: `--check` 実行時の警告閾値（自動改行は行わない）
+- `max_line_length`: フォーマット後の行幅上限。越えた場合は `--check` だけでなく通常実行でもエラーで知らせる
 - `align_case_colon`: `case`/`casez`/`casex` のラベル `:` を列揃えする
 - `auto_wrap_long_lines`: `max_line_length` を超えた行をカンマ/空白位置で折り返す試験的ヒューリスティック
 
