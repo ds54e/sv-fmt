@@ -135,7 +135,7 @@ fn check_and_in_place_conflict() {
         .arg(&file)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--check and --in-place"));
+        .stderr(predicate::str::contains("cannot be used with '--in-place'"));
 }
 
 #[test]

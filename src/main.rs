@@ -1,7 +1,3 @@
-mod config;
-mod formatter;
-mod parser;
-
 use std::{
     fs,
     io::{self, Write},
@@ -10,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use formatter::format_text;
+use sv_fmt::{config, formatter::format_text};
 use walkdir::WalkDir;
 
 #[derive(Debug, Parser)]
@@ -25,7 +21,7 @@ struct Cli {
     in_place: bool,
 
     /// Only check if files are already formatted.
-    #[arg(long = "check")]
+    #[arg(long = "check", conflicts_with = "in_place")]
     check: bool,
 
     /// Path to a sv-fmt.toml configuration file.
@@ -35,10 +31,6 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    if cli.check && cli.in_place {
-        bail!("--check and --in-place cannot be used together");
-    }
 
     let config = config::load_config(cli.config.as_deref())?;
     let files = collect_files(&cli.paths)?;
@@ -57,20 +49,22 @@ fn main() -> Result<()> {
         let original = read_input(&path)?;
         let formatted = format_text(&original, &config)?;
         let normalized = ensure_trailing_newline(&formatted);
+        let original_normalized = ensure_trailing_newline(&original);
+
+        let violations = line_length_violations(&normalized, config.max_line_length);
+        if !violations.is_empty() {
+            lint_failures.push((path.clone(), violations));
+        }
 
         if cli.check {
-            if normalized != ensure_trailing_newline(&original) {
+            if normalized != original_normalized {
                 failed_paths.push(path.clone());
-            }
-            let violations = line_length_violations(&normalized, config.max_line_length);
-            if !violations.is_empty() {
-                lint_failures.push((path.clone(), violations));
             }
             continue;
         }
 
         if cli.in_place {
-            if normalized != ensure_trailing_newline(&original) {
+            if normalized != original_normalized {
                 fs::write(&path, normalized)?;
             }
         } else {
@@ -78,10 +72,12 @@ fn main() -> Result<()> {
         }
     }
 
-    if cli.check && (!failed_paths.is_empty() || !lint_failures.is_empty()) {
+    if !failed_paths.is_empty() {
         for path in &failed_paths {
             eprintln!("needs formatting: {}", path.display());
         }
+    }
+    if !lint_failures.is_empty() {
         for (path, lines) in &lint_failures {
             for violation in lines {
                 eprintln!(
@@ -97,10 +93,13 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if !lint_failures.is_empty() {
-            eprintln!("hint: adjust max_line_length in sv-fmt.toml or via --config if needed");
-        }
+        eprintln!("hint: adjust max_line_length in sv-fmt.toml or via --config if needed");
+    }
+    if cli.check && (!failed_paths.is_empty() || !lint_failures.is_empty()) {
         std::process::exit(1);
+    }
+    if !cli.check && !lint_failures.is_empty() {
+        bail!("line length violations detected; see output above");
     }
 
     Ok(())
@@ -111,7 +110,8 @@ fn collect_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     for path in paths {
         let metadata = fs::metadata(path).with_context(|| format!("failed to read metadata for {}", path.display()))?;
         if metadata.is_dir() {
-            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(path) {
+                let entry = entry.with_context(|| format!("failed to traverse {}", path.display()))?;
                 if entry.file_type().is_file() && is_sv_file(entry.path()) {
                     files.push(entry.path().to_path_buf());
                 }
@@ -137,15 +137,11 @@ fn is_sv_file(path: &Path) -> bool {
 
 fn read_input(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let content = if bytes.starts_with(b"\xEF\xBB\xBF") {
-        &bytes[3..]
-    } else {
-        &bytes
-    };
-    let mut text =
-        String::from_utf8(content.to_vec()).with_context(|| format!("{} is not valid UTF-8", path.display()))?;
-    text = normalize_newlines(&text);
-    Ok(text)
+    let mut text = String::from_utf8(bytes).with_context(|| format!("{} is not valid UTF-8", path.display()))?;
+    if text.starts_with('\u{feff}') {
+        text.drain(..1);
+    }
+    Ok(normalize_newlines(&text))
 }
 
 fn normalize_newlines(input: &str) -> String {
