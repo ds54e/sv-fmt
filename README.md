@@ -51,6 +51,7 @@ inline_end_else = true
 space_after_comma = true
 remove_call_space = true
 max_line_length = 100
+align_case_colon = true
 ```
 
 - `indent_width`, `use_tabs`: インデント幅とタブ使用有無
@@ -60,6 +61,9 @@ max_line_length = 100
 - `space_after_comma`: カンマ後スペース強制、直前スペース除去
 - `remove_call_space`: 関数/タスク呼び出し名と `(` の間のスペースを削除
 - `max_line_length`: `--check` 実行時の警告閾値（自動改行は行わない）
+- `align_case_colon`: `case`/`casez`/`casex` のラベル `:` を列揃えする
+
+プロジェクトに合わせて調整できるサンプル設定は `sv-fmt.example.toml` にまとまっています。必要に応じて `sv-fmt.toml` としてコピーし、コメントを参考に値を書き換えてください。
 
 ## ライセンス
 

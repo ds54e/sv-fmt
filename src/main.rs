@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     }
 
     let mut failed_paths = Vec::new();
-    let mut lint_failures: Vec<(PathBuf, Vec<usize>)> = Vec::new();
+    let mut lint_failures: Vec<(PathBuf, Vec<(usize, usize)>)> = Vec::new();
 
     for path in files {
         let original = read_input(&path)?;
@@ -83,10 +83,11 @@ fn main() -> Result<()> {
             eprintln!("needs formatting: {}", path.display());
         }
         for (path, lines) in &lint_failures {
-            for line in lines {
+            for (line, length) in lines {
                 eprintln!(
-                    "line {} exceeds max_line_length (>{}) in {}",
+                    "line {} has {} columns (max {}) in {}",
                     line,
+                    length,
                     config.max_line_length,
                     path.display()
                 );
@@ -164,18 +165,15 @@ fn ensure_trailing_newline(text: &str) -> String {
     result
 }
 
-fn line_length_violations(text: &str, max_len: usize) -> Vec<usize> {
+fn line_length_violations(text: &str, max_len: usize) -> Vec<(usize, usize)> {
     if max_len == 0 {
         return Vec::new();
     }
     text.lines()
         .enumerate()
         .filter_map(|(idx, line)| {
-            if line.chars().count() > max_len {
-                Some(idx + 1)
-            } else {
-                None
-            }
+            let cols = line.chars().count();
+            if cols > max_len { Some((idx + 1, cols)) } else { None }
         })
         .collect()
 }

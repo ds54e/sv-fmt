@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
-use sv_parser::{NodeEvent, RefNode, SyntaxTree};
+use sv_parser::{Iter, NodeEvent, RefNode, RefNodes, SyntaxTree};
 
 use crate::{
     config::FormatConfig,
@@ -60,8 +60,9 @@ impl Token {
 pub fn format_text(input: &str, config: &FormatConfig) -> Result<String> {
     let tree = parser::parse(input, &SvParserCfg::default())?;
     let body_spans = collect_statement_spans(&tree);
+    let case_alignment = collect_case_alignment(&tree);
     let tokens = tokenize(&tree);
-    let mut formatter = Formatter::new(config, tokens, body_spans);
+    let mut formatter = Formatter::new(config, tokens, body_spans, case_alignment);
     formatter.format()
 }
 
@@ -133,12 +134,7 @@ fn handle_locate(
         return;
     }
 
-    tokens.push(Token::new_spanned(
-        text,
-        classify_token(text),
-        offset,
-        text.len(),
-    ));
+    tokens.push(Token::new_spanned(text, classify_token(text), offset, text.len()));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -211,6 +207,58 @@ fn node_span(node: RefNode) -> Option<ByteSpan> {
         }
     }
     start.map(|s| ByteSpan { start: s, end })
+}
+
+fn collect_case_alignment(tree: &SyntaxTree) -> HashMap<usize, usize> {
+    let mut alignment = HashMap::new();
+    for event in tree.into_iter().event() {
+        if let NodeEvent::Enter(RefNode::CaseStatement(stmt)) = event {
+            if let sv_parser::CaseStatement::Normal(case) = stmt {
+                let mut entries = Vec::new();
+                collect_case_item(&case.nodes.3, &mut entries);
+                for item in &case.nodes.4 {
+                    collect_case_item(item, &mut entries);
+                }
+                if entries.len() >= 2 {
+                    if let Some(max_width) = entries.iter().map(|(_, width)| *width).max() {
+                        for (offset, width) in entries {
+                            let padding = max_width.saturating_sub(width) + 1;
+                            alignment.insert(offset, padding);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    alignment
+}
+
+fn collect_case_item(item: &sv_parser::CaseItem, entries: &mut Vec<(usize, usize)>) {
+    match item {
+        sv_parser::CaseItem::NonDefault(node) => {
+            if let Some(start) = first_token_offset((&node.nodes.0).into()) {
+                let symbol = &node.nodes.1.nodes.0;
+                let width = symbol.offset.saturating_sub(start);
+                entries.push((symbol.offset, width));
+            }
+        }
+        sv_parser::CaseItem::Default(node) => {
+            if let Some(symbol) = &node.nodes.1 {
+                let start = node.nodes.0.nodes.0.offset;
+                let width = symbol.nodes.0.offset.saturating_sub(start);
+                entries.push((symbol.nodes.0.offset, width));
+            }
+        }
+    }
+}
+
+fn first_token_offset(nodes: RefNodes) -> Option<usize> {
+    for event in Iter::new(nodes).event() {
+        if let NodeEvent::Enter(RefNode::Locate(loc)) = event {
+            return Some(loc.offset);
+        }
+    }
+    None
 }
 
 fn classify_token(text: &str) -> TokenKind {
@@ -292,6 +340,7 @@ struct Formatter<'a> {
     config: &'a FormatConfig,
     tokens: Vec<Token>,
     body_spans: HashMap<usize, ByteSpan>,
+    case_alignment: HashMap<usize, usize>,
     idx: usize,
     output: String,
     indent_level: usize,
@@ -328,11 +377,17 @@ enum WrapKeyword {
 }
 
 impl<'a> Formatter<'a> {
-    fn new(config: &'a FormatConfig, tokens: Vec<Token>, body_spans: HashMap<usize, ByteSpan>) -> Self {
+    fn new(
+        config: &'a FormatConfig,
+        tokens: Vec<Token>,
+        body_spans: HashMap<usize, ByteSpan>,
+        case_alignment: HashMap<usize, usize>,
+    ) -> Self {
         Self {
             config,
             tokens,
             body_spans,
+            case_alignment,
             idx: 0,
             output: String::new(),
             indent_level: 0,
@@ -394,19 +449,70 @@ impl<'a> Formatter<'a> {
     }
 
     fn handle_comment(&mut self, token: &Token) {
+        let text = token.text.trim_end_matches('\n');
+        if text.trim_start().starts_with("/*") {
+            self.emit_block_comment(text);
+            return;
+        }
+        self.emit_line_comment(text, token.text.contains('\n'));
+    }
+
+    fn emit_line_comment(&mut self, text: &str, had_newline: bool) {
         if self.at_line_start {
             self.write_indent();
-        } else if !self.output.ends_with(' ') {
-            self.output.push(' ');
+        } else {
+            self.trim_trailing_whitespace();
+            if self.output.ends_with('\n') {
+                self.write_indent();
+            } else {
+                self.output.push(' ');
+            }
         }
-        self.output.push_str(token.text.trim_end_matches('\n'));
-        if token.text.contains('\n') {
+        self.output.push_str(text);
+        if had_newline {
             self.output.push('\n');
             self.at_line_start = true;
         } else {
-            self.pending_space = true;
+            self.at_line_start = false;
         }
+        self.pending_space = false;
         self.previous_call_ident = false;
+    }
+
+    fn emit_block_comment(&mut self, text: &str) {
+        self.ensure_blank_line_before_block_comment();
+        self.write_indent();
+        self.output.push_str(text);
+        self.output.push('\n');
+        self.at_line_start = true;
+        self.pending_space = false;
+        self.previous_call_ident = false;
+        self.ensure_blank_line_after_block_comment();
+    }
+
+    fn ensure_blank_line_before_block_comment(&mut self) {
+        self.trim_trailing_whitespace();
+        if self.output.is_empty() {
+            self.at_line_start = true;
+            return;
+        }
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+        if !self.output.ends_with("\n\n") {
+            self.output.push('\n');
+        }
+        self.at_line_start = true;
+    }
+
+    fn ensure_blank_line_after_block_comment(&mut self) {
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+        if !self.output.ends_with("\n\n") {
+            self.output.push('\n');
+        }
+        self.at_line_start = true;
     }
 
     fn handle_directive(&mut self, token: &Token) {
@@ -429,6 +535,12 @@ impl<'a> Formatter<'a> {
         let lowered = token.lowered();
         if is_dedent_keyword(&lowered) {
             self.indent_level = self.indent_level.saturating_sub(1);
+        }
+
+        if self.config.align_case_colon && token.text == ":" {
+            if self.apply_case_alignment(token) {
+                return;
+            }
         }
 
         if self.at_line_start {
@@ -461,6 +573,21 @@ impl<'a> Formatter<'a> {
             let span = self.body_spans.get(&token.offset).cloned();
             self.wrap_tracker.maybe_start(&lowered, span);
         }
+    }
+
+    fn apply_case_alignment(&mut self, token: &Token) -> bool {
+        if let Some(padding) = self.case_alignment.get(&token.offset).copied() {
+            self.trim_trailing_whitespace();
+            for _ in 0..padding {
+                self.output.push(' ');
+            }
+            self.output.push(':');
+            self.pending_space = true;
+            self.at_line_start = false;
+            self.previous_call_ident = false;
+            return true;
+        }
+        false
     }
 
     fn write_indent(&mut self) {
@@ -775,6 +902,9 @@ module top;
 endmodule
 ";
         let formatted = format_text(input, &cfg()).unwrap();
+        let tree = parser::parse(input, &SvParserCfg::default()).unwrap();
+        let align_map = collect_case_alignment(&tree);
+        dbg!(&align_map);
         assert_eq!(formatted, expected);
     }
 
@@ -869,6 +999,55 @@ endmodule
         assert!(
             !formatted.contains("if (cond)\n    begin"),
             "case body should not trigger auto begin:\n{formatted}"
+        );
+    }
+
+    #[test]
+    fn comment_spacing_rules() {
+        let input = "module x;
+initial begin
+//leading
+assign a = 1;   //  trailing
+/* block comment */
+assign b = 2;
+end
+endmodule
+";
+        let formatted = format_text(input, &cfg()).unwrap();
+        assert!(
+            formatted.contains("  //leading"),
+            "leading comment should only have indent:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("assign a = 1; //  trailing"),
+            "inline comment should have a single separator space:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("\n\n    /* block comment */\n\n"),
+            "block comment should be surrounded by blank lines:\n{formatted}"
+        );
+    }
+
+    #[test]
+    fn aligns_case_colons() {
+        let input = "module x;
+always_comb begin
+case(sel)
+  2'b0: foo = 0;
+  4'b1010: foo = 1;
+  default: foo = 2;
+endcase
+end
+endmodule
+";
+        let formatted = format_text(input, &cfg()).unwrap();
+        let short = formatted
+            .lines()
+            .find(|line| line.contains("foo = 0;"))
+            .expect("missing short case item");
+        assert!(
+            short.contains("0    :"),
+            "short label should be padded before colon:\n{formatted}"
         );
     }
 

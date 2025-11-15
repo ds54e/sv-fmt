@@ -1,0 +1,30 @@
+# Example configuration file for sv-fmt. Copy this file to sv-fmt.toml and
+# tweak the values to fit your project.
+
+# Number of spaces per indent level when use_tabs = false.
+indent_width = 2
+
+# Use tabs instead of spaces for indentation.
+use_tabs = false
+
+# Left-align preprocessor directives regardless of indent level.
+align_preprocessor = true
+
+# Automatically wrap multiline if/else/loop bodies with begin...end.
+wrap_multiline_blocks = true
+
+# Keep `end else` on the same line when possible.
+inline_end_else = true
+
+# Force a space after each comma.
+space_after_comma = true
+
+# Remove spaces between subroutine names and the opening parenthesis.
+remove_call_space = true
+
+# Maximum allowed line length when running with --check (0 disables the check).
+max_line_length = 100
+
+# Align `case`/`casez`/`casex` item colons within the same statement.
+align_case_colon = true
+

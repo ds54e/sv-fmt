@@ -17,6 +17,7 @@ pub struct FormatConfig {
     pub space_after_comma: bool,
     pub remove_call_space: bool,
     pub max_line_length: usize,
+    pub align_case_colon: bool,
 }
 
 impl Default for FormatConfig {
@@ -30,6 +31,7 @@ impl Default for FormatConfig {
             space_after_comma: true,
             remove_call_space: true,
             max_line_length: 100,
+            align_case_colon: true,
         }
     }
 }
